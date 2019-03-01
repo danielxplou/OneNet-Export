@@ -3,7 +3,7 @@
 """
 Created on Tue Feb 19 11:12:07 2019
 
-@author: shdt
+@author: Daniel Lou
 """
 
 import requests
