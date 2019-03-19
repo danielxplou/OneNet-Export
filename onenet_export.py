@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Tue Feb 19 11:12:07 2019
+Created on Fri Mar 15 14:44:55 2019
 
-@author: shdt
+@author: daniel Lou
 """
 
 import requests
@@ -14,89 +14,30 @@ import os
 import datetime
 import pymysql
 import traceback
+import threading
 
+datapoint_count = 0
+threadLock = threading.Lock()
 
-class Device():
-    def __init__(self,DEVICEID,APIKEY):
-        self.DEVICEID = DEVICEID
-        self.APIKEY = APIKEY
-        self.url = 'http://api.heclouds.com/devices/%s/datapoints'%(self.DEVICEID)
-        self.headers = { "api-key":self.APIKEY,"Connection":"close"}
-    def upload_point(self,DataStreamName,VALUE):
-        dict = {"datastreams":[{"id":"id","datapoints":[{"value":0}]}]}
-        dict['datastreams'][0]['id'] = DataStreamName
-        dict['datastreams'][0]['datapoints'][0]['value'] = VALUE
-        if "succ" in requests.post(self.url,headers=self.headers,data = json.dumps(dict)).text:
-            print("Value:",VALUE," has been uploaded to ",DataStreamName," at ",time.ctime())
-    def get_stream(self,DataStreamName):
-        data = json.loads(requests.get(self.url,headers=self.headers,).text)
-        for i in data['data']['datastreams']:
-            if i["id"] == DataStreamName:
-                return i['datapoints']
-        else:
-            return "Not found DataStreamName - %s "%DataStreamName
-        
+class ExportThread (threading.Thread):
+#    def __init__(self, threadID''', APIKEY, Devices, StreamName, Start, TableName'''):
+    def __init__(self, threadID, threadName, APIKEY, Devices, StreamName, StartTime, TableName):
+        threading.Thread.__init__(self)
+        self.threadID = threadID
+        self.threadName = threadName
+        self.apikey = APIKEY
+        self.devices = Devices
+        self.streamname = StreamName
+        self.starttime = StartTime
+        self.tablename = TableName
+    def run(self):
+        #print ("开始线程：%s"%(self.threadName))
+        WriteData2DB(self.apikey, self.devices, self.streamname, 
+                     self.starttime, self.tablename)
+        #print ("退出线程：%s"%(self.threadName))
 
-class Product():
-    def __init__(self,APIKEY):
-        self.APIKEY = APIKEY
-        self.url = 'http://api.heclouds.com/devices'
-        self.headers = { "api-key":self.APIKEY,"Connection":"close"}
-    def get_devices(self):
-        data = json.loads(requests.get(self.url,headers=self.headers,).text)
-        devices = data['data']['devices']
-        total_count = data['data']['total_count']
-        per_page = data['data']['per_page']
-
-        for p in range(2,total_count//per_page + 2):
-            data = json.loads(requests.get(self.url + '?page=%d'%p ,headers=self.headers,).text)
-            devices.extend(data['data']['devices'])
-            
-        return devices
-
-
-def getUrlRespHtml(APIKEY, url):
-    heads = { "api-key":APIKEY,
-             "Connection":"close"}
-    try:
-        respHtml = requests.get(url,headers=heads,timeout=10).text
-    except [requests.exceptions.HTTPError, 
-            requests.exceptions.ConnectTimeout, 
-            requests.exceptions.ConnectionError] as e:
-        print(e.code)
-        print("Fail to open URL:" + url)
-        return 'fail'
-    return respHtml
-
-def getDevices(APIKEY):
-    url='http://api.heclouds.com/devices'
-    html = getUrlRespHtml(APIKEY, url)
-    data = json.loads(html)
-    devices = data['data']['devices']
-    total_count = data['data']['total_count']
-    per_page = data['data']['per_page']
-    
-    for p in range(2,total_count//per_page + 2):
-        url='http://api.heclouds.com/devices'+ '?page=%d'%p
-        #print(url)
-        html = getUrlRespHtml(APIKEY, url)
-        if html.find('fail') >= 0:
-            continue
-        data = json.loads(html)
-        devices.extend(data['data']['devices'])
-    return devices
-
-def TruncTable(Table):
-    # 打开数据库连接
-    db = pymysql.connect("localhost","root","root.1234","iot" )
-    # 使用cursor()方法获取操作游标 
-    cursor = db.cursor()
-    cursor.execute('TRUNCATE TABLE %s'%Table)
-    # 提交到数据库执行
-    db.commit()
-    cursor.close()
-    db.close()
-    
+    def getThreadName(self):
+        return self.threadName
 
 
 def WriteDevices2DB(Devices, TableName):
@@ -137,11 +78,34 @@ def WriteDevices2DB(Devices, TableName):
     db.close()
     print('No:%d devices save to mysql db'%len(devices))
 
-def WriteData2DB(APIKEY, Devices, StreamName, Start, TableName):
+def WriteData2DBMT(DevicesPerThread, APIKEY, Devices, StreamName, StartTime, TableName):
+    if len(Devices) == 0:
+        return []
+    i = 0
+    threads =[]
+    for i in range(len(Devices)//DevicesPerThread):
+        devices = Devices[i*DevicesPerThread:(i+1)*DevicesPerThread]
+        thread = ExportThread(i+1, 'thread-%s-%d'%(TableName, (i+1)), APIKEY, devices, StreamName, StartTime, TableName)
+        threads.append(thread)
+    if len(Devices) < DevicesPerThread:
+        devices = Devices
+    else:
+        devices = Devices[(i+1)*DevicesPerThread:]
+        i += 1
+    thread = ExportThread(i+1, 'thread-%s-%d'%(TableName, (i+1)), APIKEY, devices, StreamName, StartTime, TableName)
+    threads.append(thread)
+    for t in threads:
+        t.start()
+    return threads
+    
+
+
+def WriteData2DB(APIKEY, Devices, StreamName, StartTime, TableName):
+    global datapoint_count
     devices = Devices
-    start = datetime.datetime.strftime(Start, '%Y-%m-%dT%H:%M:%S')
+    strStart = StartTime
     for d in devices:
-        url = 'http://api.heclouds.com/devices/%s/datapoints?sort=DESC&limit=1000&start=%s'%(d['id'],start)
+        url = 'http://api.heclouds.com/devices/%s/datapoints?sort=DESC&limit=1000&start=%s'%(d['id'],strStart)
         html = getUrlRespHtml(APIKEY, url)
         if html.find('fail') >= 0:
             continue
@@ -164,7 +128,13 @@ def WriteData2DB(APIKEY, Devices, StreamName, Start, TableName):
         
         if len(ds) > 0:
             WriteData2DBbyDevice(d['id'], ds, TableName)
-        print('No:%d device id:%s datapoint number:%d save to mysql db'%(devices.index(d) + 1, d['id'], len(ds)))
+        
+        # 获取锁，用于线程同步
+        threadLock.acquire()
+        datapoint_count += len(ds)
+        # 释放锁，开启下一个线程
+        threadLock.release()
+        #print('No:%d device id:%s datapoint number:%d save to mysql db'%(devices.index(d) + 1, d['id'], len(ds)))
         #if devices.index(d)%50 == 0:
         #    time.sleep(10)
         
@@ -198,7 +168,7 @@ def WriteData2DBbyDevice(DeviceID, DataStream, TableName):
             period = str(0)
         
         FrameType = s[2:4]
-
+        
         CSQ = ''  # CSQ
         Temperature = '' # 'Temperature'
         Voltage = ''  # 'Voltage'
@@ -257,71 +227,35 @@ def WriteData2DBbyDevice(DeviceID, DataStream, TableName):
     cursor.close()
     db.close()
 
-def writeDevices2Excel(Devices,ExcelFilename):
-    outwb = openpyxl.Workbook()  # 打开一个将写的文件
-    outws = outwb.create_sheet(index=0)  # 在将写的文件创建sheet
-    devices = Devices
-    #write colum header
-    keys = devices[0].keys()
-    for i in range(1,len(devices)):
-        keys=list(set(keys).union(set(devices[i].keys())))
+def getUrlRespHtml(APIKEY, url):
+    heads = { "api-key":APIKEY,
+             "Connection":"close"}
+    try:
+        respHtml = requests.get(url,headers=heads,timeout=60).text
+    except:
+        print("Fail to open URL:" + url)
+        return 'fail'
+    return respHtml
 
-    keys.sort()
+def getDevices(APIKEY):
+    url='http://api.heclouds.com/devices'
+    html = getUrlRespHtml(APIKEY, url)
+    if html.find('fail') >= 0:
+        return []
+    data = json.loads(html)
+    devices = data['data']['devices']
+    total_count = data['data']['total_count']
+    per_page = data['data']['per_page']
     
-    maxcol = len(keys)
-    for col in range(1,maxcol):
-        outws.cell(1, col).value = keys[col-1]
-
-    col = 1       
-    for row in range(2,len(devices)+2):
-        for col in range(1,maxcol):
-            value = devices[row-2].get(keys[col-1])
-            if type(value) == dict:
-                value = str(value)
-            if type(value) == list:
-                value = str(value)
-            #print value
-            outws.cell(row, col).value = value  # 写文件
-    saveExcel = ExcelFilename
-    outwb.save(saveExcel)  # 一定要记得保存
-    #print "device count:",len(devices)
-
-
-def writeStreams2Excel(APIKEY,Devices,StreamName,ExcelFilename):
-    outwb = openpyxl.load_workbook(ExcelFilename)  # 打开一个将写的文件
-    outws = outwb.create_sheet(index=0)  # 在将写的文件创建stream sheet
-    devices = Devices
-    #write colum header
-    outws.cell(1, 1).value = 'deviceid'
-    outws.cell(1, 2).value = 'imei'
-    outws.cell(1, 3).value = 'time'
-    outws.cell(1, 4).value = 'period'
-    outws.cell(1, 5).value = 'CSQ'
-    outws.cell(1, 6).value = 'Temperature'
-    outws.cell(1, 7).value = 'Voltage'
-    outws.cell(1, 8).value = 'RSRP'
-    outws.cell(1, 9).value = 'SINR'
-
-    outws.cell(1, 10).value = 'last-CSQ'
-    outws.cell(1, 11).value = 'last-Temperature'
-    outws.cell(1, 12).value = 'last-Voltage'
-    outws.cell(1, 13).value = 'last-RSRP'
-    outws.cell(1, 14).value = 'last-SINR'
-
-    outws.cell(1, 15).value = 'PCI'
-    outws.cell(1, 16).value = 'ECL'
-    outws.cell(1, 17).value = 'BatPer'
-    outws.cell(1, 18).value = 'ICCID'
-    outws.cell(1, 19).value = 'CellID'
-    
-    outws.cell(1, 20).value = 'value'
-    
-    row_start = 2
-    for d in devices:
-        row_start = writeStream2excel(APIKEY,d['id'],StreamName,outws,row_start)
-        print('device number:%d device id:%s download into excel'%(devices.index(d)+1,d['id']))
-        outwb.save(ExcelFilename)  # 一定要记得保存
-    outwb.save(ExcelFilename)  # 一定要记得保存
+    for p in range(2,total_count//per_page + 2):
+        url='http://api.heclouds.com/devices'+ '?page=%d'%p
+        #print(url)
+        html = getUrlRespHtml(APIKEY, url)
+        if html.find('fail') >= 0:
+            continue
+        data = json.loads(html)
+        devices.extend(data['data']['devices'])
+    return devices
 
 def hexstr2int(HexStr):
     val = int(HexStr, 16)
@@ -353,67 +287,6 @@ def list2hexstr(lv):
         s += strh
     return s
 
-def writeStream2excel(APIKEY,DeviceID,StreamName,Outws,Row_start):
-    url = 'http://api.heclouds.com/devices/%s/datapoints?limit=6000'%DeviceID
-    httphd = { "api-key":APIKEY,"Connection":"close"}
-    row_start = Row_start
-    outws = Outws
-    datapoints = []
-    while True:
-        data = json.loads(requests.get(url,headers=httphd,).text)
-        if data['data']['count'] > 0 :
-            for i in data['data']['datastreams']:
-                if i['id'] == StreamName:
-                    datapoints.extend(i['datapoints'])
-        if 'cursor' in data['data'].keys():
-            url = url + '&cursor=%s'%data['data']['cursor']
-            print(url)
-        else:
-            break
-    print('datapoints len:', len(datapoints))
-    for row in range(len(datapoints)):
-        outws.cell(row_start + row, 1).value = DeviceID  # 写文件
-        #print(datapoints[row])
-        outws.cell(row_start + row, 3).value = datapoints[row]['at'][:19]  # timestamp
-        lv = datapoints[row]['value']
-        last_s = '0xd9'+ '00'*50
-        s = list2hexstr(lv)
-            
-        outws.cell(row_start + row, 2).value = s[4:20]  # imei
-        if row < (len(datapoints) -1): 
-            dd = datetime.datetime.strptime(datapoints[row]['at'][:19],'%Y-%m-%d %H:%M:%S')- datetime.datetime.strptime(datapoints[row+1]['at'][:19],'%Y-%m-%d %H:%M:%S') 
-            td = round(dd.seconds/3600.0,1)
-            last_s = list2hexstr(datapoints[row+1]['value'])
-            outws.cell(row_start + row, 4).value = int(td)
-        else:             
-            outws.cell(row_start + row, 4).value = 0
-            
-        if s[2:4] == 'd9':    
-            outws.cell(row_start + row, 5).value = hexstr2int(s[20:22])  # CSQ
-            outws.cell(row_start + row, 6).value = hexstr2int(s[34:36])  # 'Temperature'
-            outws.cell(row_start + row, 7).value = hexstr2int(s[36:40])/100.00  # 'Voltage'
-            outws.cell(row_start + row, 8).value = hexstr2int(s[40:44])/10  # 'RSRP'
-            outws.cell(row_start + row, 9).value = hexstr2int(s[44:48])/10  # 'SINR'
-            
-            if last_s[2:4] == 'd9':
-                outws.cell(row_start + row, 10).value = hexstr2int(last_s[20:22])  # last-CSQ
-                outws.cell(row_start + row, 11).value = hexstr2int(last_s[34:36])  # last-Temperature'
-                outws.cell(row_start + row, 12).value = hexstr2int(last_s[36:40])/100.00  # last Voltage'
-                outws.cell(row_start + row, 13).value = hexstr2int(last_s[40:44])/10  # last RSRP'
-                outws.cell(row_start + row, 14).value = hexstr2int(last_s[44:48])/10  # last SINR'
-
-            outws.cell(row_start + row, 15).value = hexstr2int(s[48:52])  # 'PCI'
-            outws.cell(row_start + row, 16).value = hexstr2int(s[52:54])  # 'ECL'
-            outws.cell(row_start + row, 17).value = hexstr2int(s[54:56])  # 'BatPer'
-            outws.cell(row_start + row, 18).value = s[56:76]  # 'ICCID'
-            outws.cell(row_start + row, 19).value = hexstr2int(s[76:80])  # 'CellID'
-        
-        outws.cell(row_start + row, 20).value = s #value string in format 0x...
-        #end for row
-    row_start = row_start + len(datapoints)
-    return row_start
-        
-            
 if __name__ == "__main__":
     #DeviceID = '512447860'                   #设备ID
     APIKEY_HKRM_SD = 'az9mLpzgGdnRT8iDQqACTXTACnM=' #APIKey管理中的默认APIKEY
@@ -423,6 +296,7 @@ if __name__ == "__main__":
     TBL_HKRM_DATA = 'sd_data_hkrm'
     TBL_HKBL_DATA = 'sd_data_hkbl'
     DataStreamName = '3200_0_5505'          #数据流名称，没有则新建数据流
+    DEVICES_PER_THREAD = 50                  #devices number per thread
     #device = Device(DeviceID,ApiKey)
     #device.upload_point(DataStreamName,66)  #向数据流中添加新数据
     #print(device.get_stream(DataStreamName)) #查询数据流中的最新数据
@@ -434,18 +308,35 @@ if __name__ == "__main__":
     while True:
         t1=time.time()
 
+        dtStart = datetime.datetime.now()-datetime.timedelta(hours=1)
+        strStart = datetime.datetime.strftime(dtStart, '%Y-%m-%dT%H:%M:%S')
+
+        threads = []
         devices = getDevices(APIKEY_HKBL_SD)
         WriteDevices2DB(devices, TBL_HKBL_DEVICES)
-        start = datetime.datetime.now()-datetime.timedelta(hours=1)
-        WriteData2DB(APIKEY_HKBL_SD,devices,DataStreamName,start,TBL_HKBL_DATA)
+        threads.extend(WriteData2DBMT(DEVICES_PER_THREAD,APIKEY_HKBL_SD,
+                                      devices,DataStreamName,
+                                      strStart,TBL_HKBL_DATA))
 
         devices = getDevices(APIKEY_HKRM_SD)
         WriteDevices2DB(devices, TBL_HKRM_DEVICES)
-        start = datetime.datetime.now()-datetime.timedelta(hours=1)
-        WriteData2DB(APIKEY_HKRM_SD,devices,DataStreamName,start, TBL_HKRM_DATA)
-
+        threads.extend(WriteData2DBMT(DEVICES_PER_THREAD,APIKEY_HKRM_SD,
+                                      devices,DataStreamName,
+                                      strStart, TBL_HKRM_DATA))
+        for t in threads:
+            t.join()
+        
         t2=time.time()
         t_now = datetime.datetime.now()
-        print ('[%s]: 单次下载用时%s s'%(datetime.datetime.strftime(t_now, '%Y-%m-%d %H:%M:%S'), int(t2-t1)))
+        print ('[%s]: 单次下载用时%s s, %d datapoints export into mysql'%(
+                datetime.datetime.strftime(t_now, '%Y-%m-%d %H:%M:%S'), 
+                int(t2-t1), datapoint_count))
+        
+        # 获取锁，用于线程同步
+        threadLock.acquire()
+        datapoint_count = 0
+        # 释放锁，开启下一个线程
+        threadLock.release()
+
         time.sleep(3600-t2+t1)
 
